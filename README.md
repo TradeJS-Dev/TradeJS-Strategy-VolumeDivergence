@@ -2,6 +2,13 @@
 
 TradeJS strategy plugin providing `VolumeDivergence`.
 
+## Strategy overview
+
+`VolumeDivergence` compares pivot-to-pivot price movement with normalized
+volume behavior to find bullish and bearish divergence. It requires
+configurable reclaim, confirmation-candle quality, and optional retests, then
+derives stops and R-multiple targets from the setup.
+
 ## Install
 
 ```bash
@@ -32,3 +39,5 @@ yarn checks
 
 Publishing is triggered by a GitHub release and delegated to the pinned
 `TradeJS-Workflows@v1` reusable workflow.
+
+Keywords: ai, claude, codex.
