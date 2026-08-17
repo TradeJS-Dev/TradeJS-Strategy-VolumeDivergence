@@ -9,6 +9,10 @@ volume behavior to find bullish and bearish divergence. It requires
 configurable reclaim, confirmation-candle quality, and optional retests, then
 derives stops and R-multiple targets from the setup.
 
+## Logic at a glance
+
+![VolumeDivergence strategy logic](https://raw.githubusercontent.com/TradeJS-Dev/TradeJS-Strategy-VolumeDivergence/main/docs/strategy-logic.svg)
+
 ## Install
 
 ```bash
