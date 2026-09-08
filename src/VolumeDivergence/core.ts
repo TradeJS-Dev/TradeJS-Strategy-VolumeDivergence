@@ -685,7 +685,7 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
     PIVOT_LOOKBACK_RIGHT,
     MAX_BARS_BETWEEN_PIVOTS,
     MIN_BARS_BETWEEN_PIVOTS,
-    FEE_PERCENT,
+    RISK_FEE_RATE,
     MAX_LOSS_VALUE,
     BULLISH,
     BEARISH,
@@ -1107,10 +1107,10 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       stopLossPrice,
       targetR: Number(config.VOLUME_DIVERGENCE_TARGET_R_MULT ?? 3),
       maxLossValue: MAX_LOSS_VALUE,
-      feeRate: Number(FEE_PERCENT ?? 0),
+      feeRate: Number(RISK_FEE_RATE ?? 0),
       slippageBps:
-        Number(config.SLIPPAGE_BASE_BPS ?? 0) +
-        Number(config.SLIPPAGE_MARKET_IMPACT_BPS ?? 0),
+        Number(config.RISK_SLIPPAGE_BPS ?? 0) +
+        Number(config.RISK_MARKET_IMPACT_BPS ?? 0),
     });
 
     if (!qty || !Number.isFinite(qty) || qty <= 0) {
