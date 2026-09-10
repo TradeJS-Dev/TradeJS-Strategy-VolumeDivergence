@@ -44,7 +44,9 @@ type RollingMaxQueueState = {
 };
 
 type ConfirmedPivotState = {
-  indices: number[];
+  volumeIndices: number[];
+  priceLowIndices: number[];
+  priceHighIndices: number[];
   nextConfirmationIndex: number;
 };
 
@@ -131,6 +133,11 @@ export const buildVolumeDivergenceStateKey = (config: VolumeDivergenceConfig) =>
     pivotLookbackRight: config.PIVOT_LOOKBACK_RIGHT,
     minBarsBetweenPivots: config.MIN_BARS_BETWEEN_PIVOTS,
     maxBarsBetweenPivots: config.MAX_BARS_BETWEEN_PIVOTS,
+    normalizationMode: config.VOLUME_DIVERGENCE_NORMALIZATION_MODE,
+    pivotSource: config.VOLUME_DIVERGENCE_PIVOT_SOURCE,
+    pendingExpiryMode: config.VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE,
+    partialExitRate: config.VOLUME_DIVERGENCE_PARTIAL_EXIT_RATE,
+    partialExitR: config.VOLUME_DIVERGENCE_PARTIAL_EXIT_R_MULT,
     allowStructureAdvanceEntry: config.ALLOW_STRUCTURE_ADVANCE_ENTRY,
     minDivergenceAmplitudeAtrRatio: config.MIN_DIVERGENCE_AMPLITUDE_ATR_RATIO,
     minReclaimPct: config.MIN_RECLAIM_PCT,
@@ -153,7 +160,9 @@ const snapshotVolumeDivergenceState = (
     start: state.rollingMaxQueue.start,
   },
   confirmedPivotState: {
-    indices: [...state.confirmedPivotState.indices],
+    volumeIndices: [...state.confirmedPivotState.volumeIndices],
+    priceLowIndices: [...state.confirmedPivotState.priceLowIndices],
+    priceHighIndices: [...state.confirmedPivotState.priceHighIndices],
     nextConfirmationIndex: state.confirmedPivotState.nextConfirmationIndex,
   },
   pendingCandidate:
@@ -178,9 +187,15 @@ const rebaseQueue = (queue: RollingMaxQueueState, offset: number) => {
 };
 
 const rebaseConfirmedPivots = (state: ConfirmedPivotState, offset: number) => {
-  state.indices = state.indices
-    .map((index) => index - offset)
-    .filter((index) => index >= 0);
+  for (const key of [
+    "volumeIndices",
+    "priceLowIndices",
+    "priceHighIndices",
+  ] as const) {
+    state[key] = state[key]
+      .map((index) => index - offset)
+      .filter((index) => index >= 0);
+  }
   state.nextConfirmationIndex = Math.max(
     0,
     state.nextConfirmationIndex - offset,
@@ -190,11 +205,13 @@ const rebaseConfirmedPivots = (state: ConfirmedPivotState, offset: number) => {
 const appendNormalizedVolumes = ({
   candles,
   length,
+  mode,
   normalizedVolumes,
   queue,
 }: {
   candles: Candle[];
   length: number;
+  mode: VolumeDivergenceConfig["VOLUME_DIVERGENCE_NORMALIZATION_MODE"];
   normalizedVolumes: number[];
   queue: RollingMaxQueueState;
 }) => {
@@ -202,6 +219,25 @@ const appendNormalizedVolumes = ({
     const i = normalizedVolumes.length;
     const windowStart = Math.max(0, i - length + 1);
     const volume = Number(candles[i]?.volume) || 0;
+
+    if (mode === "rolling_median") {
+      const window = candles
+        .slice(windowStart, i + 1)
+        .map((candle) => Number(candle.volume) || 0)
+        .filter((value) => value > 0)
+        .sort((a, b) => a - b);
+      const middle = Math.floor(window.length / 2);
+      const median =
+        window.length === 0
+          ? 0
+          : window.length % 2 === 0
+            ? (window[middle - 1] + window[middle]) / 2
+            : window[middle];
+      normalizedVolumes.push(
+        median > 0 ? clamp((volume / median) * 100, 0, 500) : 0,
+      );
+      continue;
+    }
 
     while (
       queue.start < queue.indices.length &&
@@ -258,6 +294,44 @@ const isPivotHigh = ({
   return true;
 };
 
+const isCandlePivot = ({
+  candles,
+  index,
+  left,
+  right,
+  field,
+  kind,
+}: {
+  candles: Candle[];
+  index: number;
+  left: number;
+  right: number;
+  field: "low" | "high";
+  kind: "low" | "high";
+}) => {
+  const pivotValue = Number(candles[index]?.[field]);
+  if (!isFiniteNumber(pivotValue)) {
+    return false;
+  }
+
+  if (index - left < 0 || index + right >= candles.length) {
+    return false;
+  }
+
+  for (let i = index - left; i <= index + right; i += 1) {
+    if (i === index) continue;
+    const value = Number(candles[i]?.[field]);
+    if (
+      !isFiniteNumber(value) ||
+      (kind === "low" ? value <= pivotValue : value >= pivotValue)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
 const candleDeltaProxy = (candle: Candle): number => {
   const volume = Number(candle.volume) || 0;
   const range = Math.max(Math.abs(candle.high - candle.low), 1e-9);
@@ -270,12 +344,14 @@ const appendConfirmedPivotIndices = ({
   normalizedVolumes,
   lookbackLeft,
   lookbackRight,
+  pivotSource,
   state,
 }: {
   candles: Candle[];
   normalizedVolumes: number[];
   lookbackLeft: number;
   lookbackRight: number;
+  pivotSource: VolumeDivergenceConfig["VOLUME_DIVERGENCE_PIVOT_SOURCE"];
   state: ConfirmedPivotState;
 }) => {
   const maxConfirmationIndex = candles.length - 1;
@@ -284,6 +360,7 @@ const appendConfirmedPivotIndices = ({
     const candidatePivotIndex = state.nextConfirmationIndex - lookbackRight;
 
     if (
+      pivotSource === "volume" &&
       candidatePivotIndex >= 0 &&
       isPivotHigh({
         values: normalizedVolumes,
@@ -292,7 +369,35 @@ const appendConfirmedPivotIndices = ({
         right: lookbackRight,
       })
     ) {
-      state.indices.push(candidatePivotIndex);
+      state.volumeIndices.push(candidatePivotIndex);
+    }
+    if (
+      pivotSource === "price" &&
+      candidatePivotIndex >= 0 &&
+      isCandlePivot({
+        candles,
+        index: candidatePivotIndex,
+        left: lookbackLeft,
+        right: lookbackRight,
+        field: "low",
+        kind: "low",
+      })
+    ) {
+      state.priceLowIndices.push(candidatePivotIndex);
+    }
+    if (
+      pivotSource === "price" &&
+      candidatePivotIndex >= 0 &&
+      isCandlePivot({
+        candles,
+        index: candidatePivotIndex,
+        left: lookbackLeft,
+        right: lookbackRight,
+        field: "high",
+        kind: "high",
+      })
+    ) {
+      state.priceHighIndices.push(candidatePivotIndex);
     }
 
     state.nextConfirmationIndex += 1;
@@ -302,7 +407,8 @@ const appendConfirmedPivotIndices = ({
 const findLatestDivergence = ({
   candles,
   normalizedVolumes,
-  confirmedPivots,
+  confirmedPivotState,
+  pivotSource,
   lookbackLeft,
   lookbackRight,
   rangeLower,
@@ -310,7 +416,8 @@ const findLatestDivergence = ({
 }: {
   candles: Candle[];
   normalizedVolumes: number[];
-  confirmedPivots: number[];
+  confirmedPivotState: ConfirmedPivotState;
+  pivotSource: VolumeDivergenceConfig["VOLUME_DIVERGENCE_PIVOT_SOURCE"];
   lookbackLeft: number;
   lookbackRight: number;
   rangeLower: number;
@@ -322,59 +429,57 @@ const findLatestDivergence = ({
     return null;
   }
 
-  const lastConfirmedPivotIndex =
-    confirmedPivots.length > 0
-      ? confirmedPivots[confirmedPivots.length - 1]
-      : undefined;
+  const buildCandidate = (
+    indices: number[],
+    kind: PivotDivergence["kind"],
+  ): PivotDivergence | null => {
+    const lastConfirmedPivotIndex = indices.at(-1);
+    if (lastConfirmedPivotIndex !== currentPivotIndex) {
+      return null;
+    }
+    const previousPivotIndex = indices.at(-2);
+    if (previousPivotIndex == null || previousPivotIndex < lookbackLeft) {
+      return null;
+    }
 
-  if (lastConfirmedPivotIndex !== currentPivotIndex) {
-    return null;
-  }
+    const previousConfirmationIndex = previousPivotIndex + lookbackRight;
+    const barsBetweenPivotConfirmations =
+      currentConfirmationIndex - previousConfirmationIndex - 1;
+    if (
+      barsBetweenPivotConfirmations < rangeLower ||
+      barsBetweenPivotConfirmations > rangeUpper
+    ) {
+      return null;
+    }
 
-  const previousPivotIndex =
-    confirmedPivots.length > 1
-      ? confirmedPivots[confirmedPivots.length - 2]
-      : undefined;
+    const currentPivotVolumeNorm = normalizedVolumes[currentPivotIndex];
+    const previousPivotVolumeNorm = normalizedVolumes[previousPivotIndex];
+    const currentPivotLow = Number(candles[currentPivotIndex]?.low);
+    const previousPivotLow = Number(candles[previousPivotIndex]?.low);
+    const currentPivotHigh = Number(candles[currentPivotIndex]?.high);
+    const previousPivotHigh = Number(candles[previousPivotIndex]?.high);
+    const currentPivotCandle = candles[currentPivotIndex];
+    if (
+      !isFiniteNumber(currentPivotVolumeNorm) ||
+      !isFiniteNumber(previousPivotVolumeNorm) ||
+      !isFiniteNumber(currentPivotLow) ||
+      !isFiniteNumber(previousPivotLow) ||
+      !isFiniteNumber(currentPivotHigh) ||
+      !isFiniteNumber(previousPivotHigh)
+    ) {
+      return null;
+    }
 
-  if (previousPivotIndex == null || previousPivotIndex < lookbackLeft) {
-    return null;
-  }
+    const matches =
+      kind === "bullish"
+        ? currentPivotLow < previousPivotLow &&
+          currentPivotVolumeNorm > previousPivotVolumeNorm
+        : currentPivotHigh > previousPivotHigh &&
+          currentPivotVolumeNorm < previousPivotVolumeNorm;
+    if (!matches) {
+      return null;
+    }
 
-  const previousConfirmationIndex = previousPivotIndex + lookbackRight;
-  const barsBetweenPivotConfirmations =
-    currentConfirmationIndex - previousConfirmationIndex - 1;
-  if (
-    barsBetweenPivotConfirmations < rangeLower ||
-    barsBetweenPivotConfirmations > rangeUpper
-  ) {
-    return null;
-  }
-
-  const currentPivotVolumeNorm = normalizedVolumes[currentPivotIndex];
-  const previousPivotVolumeNorm = normalizedVolumes[previousPivotIndex];
-  const currentPivotLow = Number(candles[currentPivotIndex]?.low);
-  const previousPivotLow = Number(candles[previousPivotIndex]?.low);
-  const currentPivotHigh = Number(candles[currentPivotIndex]?.high);
-  const previousPivotHigh = Number(candles[previousPivotIndex]?.high);
-  const currentPivotCandle = candles[currentPivotIndex];
-
-  if (
-    !isFiniteNumber(currentPivotVolumeNorm) ||
-    !isFiniteNumber(previousPivotVolumeNorm) ||
-    !isFiniteNumber(currentPivotLow) ||
-    !isFiniteNumber(previousPivotLow) ||
-    !isFiniteNumber(currentPivotHigh) ||
-    !isFiniteNumber(previousPivotHigh)
-  ) {
-    return null;
-  }
-
-  const volHigherLow = currentPivotVolumeNorm > previousPivotVolumeNorm;
-  const volLowerHigh = currentPivotVolumeNorm < previousPivotVolumeNorm;
-  const priceLowerLow = currentPivotLow < previousPivotLow;
-  const priceHigherHigh = currentPivotHigh > previousPivotHigh;
-
-  if (priceLowerLow && volHigherLow) {
     return {
       currentPivotIndex,
       previousPivotIndex,
@@ -387,26 +492,22 @@ const findLatestDivergence = ({
       currentPivotVolume: Number(currentPivotCandle.volume) || 0,
       currentPivotDelta: candleDeltaProxy(currentPivotCandle),
       barsBetweenPivotConfirmations,
-      kind: "bullish",
+      kind,
     };
+  };
+
+  if (pivotSource === "price") {
+    return (
+      buildCandidate(confirmedPivotState.priceLowIndices, "bullish") ??
+      buildCandidate(confirmedPivotState.priceHighIndices, "bearish")
+    );
   }
 
-  if (priceHigherHigh && volLowerHigh) {
-    return {
-      currentPivotIndex,
-      previousPivotIndex,
-      currentPivotVolumeNorm,
-      previousPivotVolumeNorm,
-      currentPivotLow,
-      previousPivotLow,
-      currentPivotHigh,
-      previousPivotHigh,
-      currentPivotVolume: Number(currentPivotCandle.volume) || 0,
-      currentPivotDelta: candleDeltaProxy(currentPivotCandle),
-      barsBetweenPivotConfirmations,
-      kind: "bearish",
-    };
-  }
+  const volumeIndices = confirmedPivotState.volumeIndices;
+  const bullish = buildCandidate(volumeIndices, "bullish");
+  if (bullish) return bullish;
+  const bearish = buildCandidate(volumeIndices, "bearish");
+  if (bearish) return bearish;
 
   return null;
 };
@@ -681,6 +782,9 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
 > = async ({ config, strategyApi, indicatorsState, data: initialData }) => {
   const {
     NORMALIZATION_LENGTH,
+    VOLUME_DIVERGENCE_NORMALIZATION_MODE,
+    VOLUME_DIVERGENCE_PIVOT_SOURCE,
+    VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE,
     PIVOT_LOOKBACK_LEFT,
     PIVOT_LOOKBACK_RIGHT,
     MAX_BARS_BETWEEN_PIVOTS,
@@ -716,7 +820,9 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       start: 0,
     },
     confirmedPivotState: {
-      indices: [],
+      volumeIndices: [],
+      priceLowIndices: [],
+      priceHighIndices: [],
       nextConfirmationIndex: 0,
     },
     pendingCandidate: null,
@@ -726,6 +832,7 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
     appendNormalizedVolumes({
       candles: state.candleWindow,
       length: NORMALIZATION_LENGTH,
+      mode: VOLUME_DIVERGENCE_NORMALIZATION_MODE,
       normalizedVolumes: state.normalizedVolumes,
       queue: state.rollingMaxQueue,
     });
@@ -735,6 +842,7 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       normalizedVolumes: state.normalizedVolumes,
       lookbackLeft: PIVOT_LOOKBACK_LEFT,
       lookbackRight: PIVOT_LOOKBACK_RIGHT,
+      pivotSource: VOLUME_DIVERGENCE_PIVOT_SOURCE,
       state: state.confirmedPivotState,
     });
   };
@@ -753,7 +861,9 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       state.normalizedVolumes.length = 0;
       state.rollingMaxQueue.indices = [];
       state.rollingMaxQueue.start = 0;
-      state.confirmedPivotState.indices = [];
+      state.confirmedPivotState.volumeIndices = [];
+      state.confirmedPivotState.priceLowIndices = [];
+      state.confirmedPivotState.priceHighIndices = [];
       state.confirmedPivotState.nextConfirmationIndex = 0;
       syncDerivedState(state);
       return;
@@ -788,7 +898,8 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
     const divergence = findLatestDivergence({
       candles: state.candleWindow,
       normalizedVolumes: state.normalizedVolumes,
-      confirmedPivots: state.confirmedPivotState.indices,
+      confirmedPivotState: state.confirmedPivotState,
+      pivotSource: VOLUME_DIVERGENCE_PIVOT_SOURCE,
       lookbackLeft: PIVOT_LOOKBACK_LEFT,
       lookbackRight: PIVOT_LOOKBACK_RIGHT,
       rangeLower: MIN_BARS_BETWEEN_PIVOTS,
@@ -846,6 +957,28 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       return { kind: "skip", code: "NO_DIVERGENCE" };
     }
 
+    if (VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE === "structural") {
+      const structuralIndices =
+        VOLUME_DIVERGENCE_PIVOT_SOURCE === "price"
+          ? state.pendingCandidate.kind === "bullish"
+            ? state.confirmedPivotState.priceLowIndices
+            : state.confirmedPivotState.priceHighIndices
+          : state.confirmedPivotState.volumeIndices;
+      const latestStructuralPivotIndex = structuralIndices.at(-1);
+      const pendingPivotIndex = findCandleIndexByTimestamp(
+        state.candleWindow,
+        state.pendingCandidate.currentPivotTimestamp,
+        -1,
+      );
+      if (
+        latestStructuralPivotIndex != null &&
+        latestStructuralPivotIndex > pendingPivotIndex
+      ) {
+        state.pendingCandidate = null;
+        return { kind: "skip", code: "PENDING_DIVERGENCE_SUPERSEDED" };
+      }
+    }
+
     updatePendingCandidateProgress(state.pendingCandidate, timestamp);
 
     if (
@@ -859,6 +992,7 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
     }
 
     if (
+      VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE === "fixed" &&
       state.pendingCandidate.barsSinceDetection > maxPendingConfirmationBars
     ) {
       state.pendingCandidate = null;
@@ -1135,6 +1269,35 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       return state;
     });
 
+    const partialExitRate = clamp(
+      Number(config.VOLUME_DIVERGENCE_PARTIAL_EXIT_RATE ?? 0),
+      0,
+      1,
+    );
+    const partialExitR = Math.max(
+      0,
+      Number(config.VOLUME_DIVERGENCE_PARTIAL_EXIT_R_MULT ?? 0.8),
+    );
+    const finalTargetR = Math.max(
+      0,
+      Number(config.VOLUME_DIVERGENCE_TARGET_R_MULT ?? 3),
+    );
+    const riskDistance = Math.abs(currentPrice - stopLossPrice);
+    const partialTakeProfitPrice =
+      modeConfig.direction === "LONG"
+        ? currentPrice + riskDistance * partialExitR
+        : currentPrice - riskDistance * partialExitR;
+    const takeProfits =
+      partialExitRate > 0 &&
+      partialExitRate < 1 &&
+      partialExitR > 0 &&
+      partialExitR < finalTargetR
+        ? [
+            { rate: partialExitRate, price: partialTakeProfitPrice },
+            { rate: 1 - partialExitRate, price: takeProfitPrice },
+          ]
+        : [{ rate: 1, price: takeProfitPrice }];
+
     return strategyApi.entry({
       code: "VOLUME_DIVERGENCE_REVERSAL_SIGNAL",
       direction: modeConfig.direction,
@@ -1144,7 +1307,7 @@ export const createVolumeDivergenceCore: CreateStrategyCore<
       orderPlan: {
         qty,
         stopLossPrice,
-        takeProfits: [{ rate: 1, price: takeProfitPrice }],
+        takeProfits,
       },
     });
   };

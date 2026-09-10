@@ -202,9 +202,64 @@ describe("buildVolumeDivergenceStateKey", () => {
       buildVolumeDivergenceStateKey(filtered),
     );
   });
+
+  it("separates every research behavior that mutates detector state", () => {
+    const baseline = buildVolumeDivergenceStateKey(makeConfig());
+
+    for (const override of [
+      { VOLUME_DIVERGENCE_NORMALIZATION_MODE: "rolling_median" },
+      { VOLUME_DIVERGENCE_PIVOT_SOURCE: "price" },
+      { VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE: "structural" },
+      { VOLUME_DIVERGENCE_PARTIAL_EXIT_RATE: 0.5 },
+    ]) {
+      expect(buildVolumeDivergenceStateKey(makeConfig(override))).not.toBe(
+        baseline,
+      );
+    }
+  });
 });
 
 describe("createVolumeDivergenceCore", () => {
+  it("detects bullish divergence between confirmed price lows", async () => {
+    const baseTs = 1_700_200_000_000;
+    const prices = [105, 103, 100, 104, 106, 102, 95, 98];
+    const volumes = [100, 80, 50, 80, 90, 80, 100, 80];
+    const candles = prices.map((price, index) =>
+      makeCandle(baseTs + index * 900_000, price, volumes[index]),
+    );
+    const strategyApi = makeStrategyApi();
+    const core = await createVolumeDivergenceCore({
+      config: makeConfig({
+        ...DIVERGENCE_TEST_CONFIG,
+        PIVOT_LOOKBACK_LEFT: 1,
+        PIVOT_LOOKBACK_RIGHT: 1,
+        VOLUME_DIVERGENCE_PIVOT_SOURCE: "price",
+      }),
+      data: candles as any,
+      strategyApi,
+      indicatorsState: makeIndicatorsState(),
+    });
+
+    expect(await core(candles.at(-1) as any, candles.at(-1) as any)).toEqual({
+      kind: "skip",
+      code: "WAIT_REVERSAL_CONFIRMATION",
+    });
+
+    const confirmation = makeFollowUpCandle({
+      previousCandle: candles.at(-1)!,
+      price: 100,
+      volume: 80,
+    });
+    strategyApi.getDecisionPriceContext.mockResolvedValue({
+      candle: confirmation,
+      timestamp: confirmation.timestamp,
+      currentPrice: confirmation.close,
+    });
+    expect((await core(confirmation as any, confirmation as any)).kind).toBe(
+      "entry",
+    );
+  });
+
   it("returns NO_DIVERGENCE when pivots do not match divergence rules", async () => {
     const candles = Array.from({ length: 12 }).map((_, index) =>
       makeCandle(1_700_000_000_000 + index * 900_000, 100 + index, 100 + index),
@@ -298,6 +353,77 @@ describe("createVolumeDivergenceCore", () => {
         }),
       }),
     );
+  });
+
+  it("splits take profit when the partial exit candidate is enabled", async () => {
+    const candles = makeBullishDivergenceCandles();
+    const strategyApi = makeStrategyApi();
+    const core = await createVolumeDivergenceCore({
+      config: makeConfig({
+        ...DIVERGENCE_TEST_CONFIG,
+        VOLUME_DIVERGENCE_PARTIAL_EXIT_RATE: 0.5,
+        VOLUME_DIVERGENCE_PARTIAL_EXIT_R_MULT: 0.8,
+      }),
+      data: candles as any,
+      strategyApi,
+      indicatorsState: makeIndicatorsState(),
+    });
+
+    await core(candles.at(-1) as any, candles.at(-1) as any);
+    const confirmation = makeFollowUpCandle({
+      previousCandle: candles.at(-1)!,
+      price: 94,
+      volume: 90,
+    });
+    strategyApi.getDecisionPriceContext.mockResolvedValue({
+      candle: confirmation,
+      timestamp: confirmation.timestamp,
+      currentPrice: confirmation.close,
+    });
+    await core(confirmation as any, confirmation as any);
+
+    expect(strategyApi.entry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderPlan: expect.objectContaining({
+          takeProfits: [
+            expect.objectContaining({ rate: 0.5 }),
+            expect.objectContaining({ rate: 0.5 }),
+          ],
+        }),
+      }),
+    );
+  });
+
+  it("keeps a structurally valid pending setup beyond the fixed timeout", async () => {
+    const candles = makeBullishDivergenceCandles();
+    const strategyApi = makeStrategyApi();
+    const core = await createVolumeDivergenceCore({
+      config: makeConfig({
+        ...DIVERGENCE_TEST_CONFIG,
+        VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE: "structural",
+      }),
+      data: candles as any,
+      strategyApi,
+      indicatorsState: makeIndicatorsState(),
+    });
+
+    await core(candles.at(-1) as any, candles.at(-1) as any);
+    let previous = candles.at(-1)!;
+    let result: any;
+    for (let index = 0; index < 6; index += 1) {
+      const next = makeFollowUpCandle({
+        previousCandle: previous,
+        price: 90.5,
+        volume: 20,
+      });
+      result = await core(next as any, next as any);
+      previous = next;
+    }
+
+    expect(result).toEqual({
+      kind: "skip",
+      code: "WAIT_REVERSAL_CONFIRMATION",
+    });
   });
 
   it("rebuilds pending bullish divergence from initial history and enters on first confirmation candle", async () => {

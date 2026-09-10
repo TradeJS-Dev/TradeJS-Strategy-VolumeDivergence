@@ -49,6 +49,8 @@ export const config = {
   LEVEL_LOOKBACK: 20,
   LEVEL_DELAY: 2,
   NORMALIZATION_LENGTH: 100,
+  VOLUME_DIVERGENCE_NORMALIZATION_MODE: "rolling_max" as const,
+  VOLUME_DIVERGENCE_PIVOT_SOURCE: "volume" as const,
   PIVOT_LOOKBACK_LEFT: 8,
   PIVOT_LOOKBACK_RIGHT: 3,
   MIN_BARS_BETWEEN_PIVOTS: 4,
@@ -63,6 +65,9 @@ export const config = {
   VOLUME_DIVERGENCE_STOP_ATR_BUFFER_MULT: 0.2,
   VOLUME_DIVERGENCE_STOP_BUFFER_PCT: 0.06,
   VOLUME_DIVERGENCE_TARGET_R_MULT: 4,
+  VOLUME_DIVERGENCE_PARTIAL_EXIT_RATE: 0,
+  VOLUME_DIVERGENCE_PARTIAL_EXIT_R_MULT: 0.8,
+  VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE: "fixed" as const,
   BULLISH: {
     enable: true,
     direction: "LONG",
@@ -90,8 +95,19 @@ export const config = {
 } as const;
 
 export type VolumeDivergenceConfig = StrategyConfig &
-  Omit<typeof config, "BACKTEST_PRICE_MODE" | "BULLISH" | "BEARISH"> & {
+  Omit<
+    typeof config,
+    | "BACKTEST_PRICE_MODE"
+    | "BULLISH"
+    | "BEARISH"
+    | "VOLUME_DIVERGENCE_NORMALIZATION_MODE"
+    | "VOLUME_DIVERGENCE_PIVOT_SOURCE"
+    | "VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE"
+  > & {
     BACKTEST_PRICE_MODE: BacktestPriceMode;
     BULLISH: VolumeDivergenceModeConfig;
     BEARISH: VolumeDivergenceModeConfig;
+    VOLUME_DIVERGENCE_NORMALIZATION_MODE: "rolling_max" | "rolling_median";
+    VOLUME_DIVERGENCE_PIVOT_SOURCE: "volume" | "price";
+    VOLUME_DIVERGENCE_PENDING_EXPIRY_MODE: "fixed" | "structural";
   };

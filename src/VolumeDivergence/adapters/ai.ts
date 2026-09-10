@@ -1,4 +1,8 @@
 import { mapAiRuntimeFromConfig } from "@tradejs/core/strategies";
+import {
+  getAiPayloadNumber,
+  withStrategyLocalAiGate,
+} from "@tradejs/strategy-kit/ai-gate";
 import type {
   AiPayload,
   Signal,
@@ -1306,7 +1310,7 @@ const postProcessAnalysis = ({
   };
 };
 
-export const volumeDivergenceAiAdapter: StrategyAiAdapter = {
+const volumeDivergenceBaseAiAdapter: StrategyAiAdapter = {
   buildPayload: ({ signal, basePayload }) => ({
     ...basePayload,
     additionalIndicators: {
@@ -1378,3 +1382,29 @@ Interpretation rules for VolumeDivergence:
       >,
     ),
 };
+
+export const volumeDivergenceAiAdapter = withStrategyLocalAiGate(
+  volumeDivergenceBaseAiAdapter,
+  {
+    id: "volume_divergence_price_pivots_prior_own_short_2026_09_10",
+    approves: ({ signal, payload }) => {
+      if (signal.direction !== "SHORT") return false;
+
+      const binanceCoinbaseSpreadAbsBps = getAiPayloadNumber(
+        payload,
+        "additionalIndicators.marketContext.execution.binanceCoinbaseSpread.absBps",
+      );
+      const nearestBuyPressureAgeBars = getAiPayloadNumber(
+        payload,
+        "additionalIndicators.baseContext.structure.liquidityTails.nearestBuyPressure.ageBars",
+      );
+
+      return (
+        binanceCoinbaseSpreadAbsBps != null &&
+        binanceCoinbaseSpreadAbsBps >= 7 &&
+        nearestBuyPressureAgeBars != null &&
+        nearestBuyPressureAgeBars >= 30
+      );
+    },
+  },
+);
