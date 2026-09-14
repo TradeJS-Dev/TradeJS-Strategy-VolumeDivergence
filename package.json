@@ -1,6 +1,6 @@
 {
   "name": "@tradejs/strategy-volume-divergence",
-  "version": "3.0.5",
+  "version": "3.0.6",
   "description": "Price-volume divergence strategy using pivot pairs, normalized volume, reclaim and retest rules, and ATR-based risk targets for TradeJS.",
   "type": "module",
   "packageManager": "yarn@4.13.0",
